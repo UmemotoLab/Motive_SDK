@@ -1,12 +1,13 @@
 {
     "udp_targets": {
-        "1": "192.168.11.39",
-        "2": "192.168.11.39"
+        "1": "192.168.11.16",
+        "2": "192.168.11.61"
     },
     "udp_port": 15769,
+    "motive_pose_port": 15770,
+    "camera_rigid_body_id": 3,
     "system_time_divider": 5,
     "recording_enabled": true,
-    "recording_directory": "G:\\マイドライブ\\LOGS_Pixhawk6c",
     "fps_monitor_enabled": true,
     "fps_monitor_window": 100,
     "fps_expected": 50,

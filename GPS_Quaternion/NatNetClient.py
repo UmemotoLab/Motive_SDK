@@ -38,6 +38,8 @@ Vector3 = struct.Struct( '<fff' )
 Quaternion = struct.Struct( '<ffff' )
 FloatValue = struct.Struct( '<f' )
 DoubleValue = struct.Struct( '<d' )
+RIGID_BODY_POSE_MAGIC = b'RBPS'
+RIGID_BODY_POSE_FORMAT = '<4sBiii4fd'
 
 # Increased size for the newest force plate
 FPCalMatrixRow = struct.Struct( '<ffffffffffff' )
@@ -131,8 +133,9 @@ class NatNetClient:
             self.udp_targets = {int(k): v for k, v in udp_targets_dict.items()}
             # 記録機能の有効/無効
             self.recording_enabled = config.get("recording_enabled", False)
-            self.recording_directory = config.get("recording_directory", "")
             self.udp_port = config.get("udp_port", 15769)
+            self.motive_pose_port = config.get("motive_pose_port", 15770)
+            self.camera_rigid_body_id = config.get("camera_rigid_body_id", 3)
             # フレームレート監視設定
             self.fps_monitor_enabled = config.get("fps_monitor_enabled", True)
             self.fps_monitor_window = config.get("fps_monitor_window", 100)
@@ -142,14 +145,17 @@ class NatNetClient:
             print(f"[警告] config.jsonの読み込みに失敗: {e}")
             self.udp_targets = {}
             self.recording_enabled = False
-            self.recording_directory = ""
             self.udp_port = 15769
+            self.motive_pose_port = 15770
+            self.camera_rigid_body_id = 3
         
         # UDP統計情報
         self.udp_send_count = 0
         self.udp_error_count = 0
         self._last_udp_send_ns_by_rb = {}
+        self._last_motive_pose_send_ns = {}
         self._udp_min_interval_ns = int(1_000_000_000 / max(self.fps_expected, 1))
+        self.motive_pose_targets = list(dict.fromkeys(self.udp_targets.values()))
 
         print(f"GPS reference initialized: ({self.ref_lat:.7f}, {self.ref_lon:.7f}, {self.ref_alt:.3f})")
         print("UDP targets configured:")
@@ -157,6 +163,10 @@ class NatNetClient:
             print(f"  Rigid Body {rb_id} → {ip}:{self.udp_port}")
         print(f"UDP sending target rate: {self.fps_expected}Hz per rigid body")
         print("Total packet count scales with the number of enabled rigid bodies")
+        print(
+            f"Rigid-body poses RB1/RB2/RB{self.camera_rigid_body_id} → "
+            f"{self.motive_pose_targets}:{self.motive_pose_port}"
+        )
 
         # Persist UDP sockets (one per target IP)
         self.udp_sockets = {}
@@ -243,28 +253,29 @@ class NatNetClient:
             print(f"Yaw calculation error: {e}")
             return 0.0
 
-    def send_udp_data(self, packed_data: bytes, target_ip: str):
+    def send_udp_data(self, packed_data: bytes, target_ip: str, port=None):
         """UDP送信（永続ソケット使用）"""
+        destination_port = self.udp_port if port is None else port
         try:
             sock = self.udp_sockets[target_ip]
-            sock.sendto(packed_data, (target_ip, self.udp_port))
+            sock.sendto(packed_data, (target_ip, destination_port))
             self.udp_send_count += 1
             return True
         except socket.timeout:
             self.udp_error_count += 1
-            print(f"✗ UDP timeout to {target_ip}:{self.udp_port}")
+            print(f"✗ UDP timeout to {target_ip}:{destination_port}")
             return False
         except socket.gaierror as e:
             self.udp_error_count += 1
-            print(f"✗ UDP address error to {target_ip}:{self.udp_port}: {e}")
+            print(f"✗ UDP address error to {target_ip}:{destination_port}: {e}")
             return False
         except ConnectionRefusedError:
             self.udp_error_count += 1
-            print(f"✗ UDP connection refused by {target_ip}:{self.udp_port}")
+            print(f"✗ UDP connection refused by {target_ip}:{destination_port}")
             return False
         except Exception as e:
             self.udp_error_count += 1
-            print(f"✗ UDP send error to {target_ip}:{self.udp_port}: {e}")
+            print(f"✗ UDP send error to {target_ip}:{destination_port}: {e}")
             return False
 
     def start_recording(self):
@@ -310,32 +321,9 @@ class NatNetClient:
             from datetime import datetime
             start_dt = datetime.fromtimestamp(self.recording_start_time)
             filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
-            # 保存先フォルダの決定と検証
-            download_folder = self.recording_directory
-            local_fallback_folder = os.path.join(os.path.dirname(__file__), "logs")
-            
-            if download_folder:
-                # 相対パスの場合は絶対パスに解決
-                if not os.path.isabs(download_folder):
-                    download_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), download_folder))
-            else:
-                download_folder = local_fallback_folder
-                
-            # ディレクトリの作成と書き込みテスト
-            try:
-                os.makedirs(download_folder, exist_ok=True)
-                filepath = os.path.join(download_folder, filename)
-                # 実際に書き込み可能かテスト
-                test_file = os.path.join(download_folder, ".write_test")
-                with open(test_file, "w") as f:
-                    f.write("")
-                os.remove(test_file)
-            except Exception as e:
-                print(f"[警告] 設定された保存先 '{download_folder}' への書き込みができませんでした: {e}")
-                print(f"スクリプト位置の '{local_fallback_folder}' に保存します。")
-                download_folder = local_fallback_folder
-                os.makedirs(download_folder, exist_ok=True)
-                filepath = os.path.join(download_folder, filename)
+            # LOGS_Pixhawk6c フォルダに保存
+            download_folder = r"G:\マイドライブ\LOGS_Pixhawk6c"
+            filepath = os.path.join(download_folder, filename)
             
             print(f"[DEBUG] CSVファイル保存先: {filepath}")
             
@@ -599,6 +587,50 @@ class NatNetClient:
                 rot[0], rot[1], rot[2], rot[3]
             ])
 
+        if (
+            new_id in (1, 2, self.camera_rigid_body_id)
+            and self.motive_pose_targets
+        ):
+            motive_x, motive_y, motive_z = pos
+            motive_qx, motive_qy, motive_qz, motive_qw = rot
+            ned_x, ned_y, ned_z, _, _, _, _ = self.motive_to_ned(
+                motive_x, motive_y, motive_z,
+                motive_qx, motive_qy, motive_qz, motive_qw
+            )
+            gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
+            if gps_lat is not None and gps_lon is not None and gps_alt is not None:
+                now_ns = time.time_ns()
+                pose_packet = struct.pack(
+                    RIGID_BODY_POSE_FORMAT,
+                    RIGID_BODY_POSE_MAGIC,
+                    new_id,
+                    int(gps_lat * 1e7),
+                    int(gps_lon * 1e7),
+                    int(gps_alt * 1000),
+                    motive_qx,
+                    motive_qy,
+                    motive_qz,
+                    motive_qw,
+                    now_ns / 1e9,
+                )
+                for target_ip in self.motive_pose_targets:
+                    last_send_ns = self._last_motive_pose_send_ns.get(target_ip)
+                    if (
+                        last_send_ns is not None
+                        and now_ns - last_send_ns < self._udp_min_interval_ns
+                    ):
+                        continue
+                    self._last_motive_pose_send_ns[target_ip] = now_ns
+                    if not self.send_udp_data(
+                        pose_packet, target_ip, self.motive_pose_port
+                    ):
+                        print(
+                            f"Failed to send pose for RB{new_id} "
+                            f"to {target_ip}:{self.motive_pose_port}"
+                        )
+            else:
+                print(f"ERROR: Motive pose GPS conversion failed for ID {new_id}")
+
         # udp_targets.jsonに設定された剛体IDのデータを処理
         if new_id in self.udp_targets:
             if new_id == 1:
@@ -638,11 +670,9 @@ class NatNetClient:
                     yaw_cdeg = int(yaw_deg * 100)
                     unix_time_sec = time.time_ns() / 1e9
 
-                    # struct パック (39バイト固定長): qx,qy,qz,qw (各float 4バイト) を追加
-                    packed = struct.pack('<BiiiHffffd',
-                        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg,
-                        motive_qx, motive_qy, motive_qz, motive_qw,
-                        unix_time_sec)
+                    # struct パック (23バイト固定長)
+                    packed = struct.pack('<BiiiHd',
+                        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
 
                     target_ip = self.udp_targets[new_id]
                     success = self.send_udp_data(packed, target_ip)

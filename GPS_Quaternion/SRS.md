@@ -105,13 +105,16 @@ Motive (50Hz) → NatNetClient → 剛体IDでルーティング → UDP → Ras
     "2": "192.168.1.20",
     "3": "192.168.1.30"
   },
-  "udp_port": 15769
+  "udp_port": 15769,
+  "motive_pose_port": 15770,
+  "camera_rigid_body_id": 3
 }
 ```
 
 - 剛体 ID=1 のデータ → `192.168.1.10:15769` に送信
 - 剛体 ID=2 のデータ → `192.168.1.20:15769` に送信
 - マッピングにない剛体IDのデータは送信しない
+- 剛体ID 1・2・カメラ（`camera_rigid_body_id`）の位置と生クォータニオンは、`udp_targets` に登録された各IPへ専用ポート `motive_pose_port` で送信する。GPS用23バイトパケットの形式とポートは変更しない。
 
 ### 4.2 ソケット管理
 
@@ -164,6 +167,28 @@ packed = struct.pack('<BiiiHd', rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg,
 # Raspi側（アンパック）
 rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = struct.unpack('<BiiiHd', packed)
 ```
+
+剛体位置・姿勢には別ポートの41バイト固定長パケットを使用する。GPSパケットとは異なり、設定済みの全宛先IPへ剛体ID 1・2・カメラ剛体のデータを配信する。
+
+| offset | サイズ | 型 | フィールド名 | 内容 |
+|--------|--------|-----|-------------|------|
+| 0 | 4byte | `char[4]` | `magic` | `RBPS`（パケット識別子） |
+| 4 | 1byte | `uint8` | `rigid_body_id` | 剛体ID |
+| 5 | 4byte | `int32` | `lat_e7` | 緯度×1e7 |
+| 9 | 4byte | `int32` | `lon_e7` | 経度×1e7 |
+| 13 | 4byte | `int32` | `alt_mm` | 高度 [mm] |
+| 17 | 16byte | `float32[4]` | `quat_x/y/z/w` | Motive生クォータニオン |
+| 33 | 8byte | `float64` | `unix_time_sec` | SDK生成Unix時刻 [秒] |
+
+```python
+struct.pack(
+    '<4sBiii4fd',
+    b'RBPS', rigid_body_id, lat_e7, lon_e7, alt_mm,
+    quat_x, quat_y, quat_z, quat_w, unix_time_sec
+)
+```
+
+受信側はGPS座標をENUローカル位置へ変換する。カメラ剛体についてはMotiveクォータニオンとカメラ取り付け軸変換からカメラ→ENU回転を構成する。各剛体の姿勢パケットは宛先IPごとに最大`fps_expected`で送信する。
 
 ---
 
@@ -439,10 +464,7 @@ if self.is_recording:
 
 #### 記録停止とCSV保存 (`stop_recording`, L283-331)
 
-- 設定ファイル `config.json` の `"recording_directory"` から指定された保存先パスを読み込み、CSVファイルを出力する
-- パスが未設定（空文字列など）の場合は、スクリプトと同じディレクトリの `logs` フォルダをデフォルト保存先とする
-- 設定されたフォルダへの書き込みテスト（ダミーファイルの作成）を行い、失敗した場合（他PCでの実行時に設定ドライブが存在しない場合など）は自動でスクリプト位置の `logs` フォルダにフォールバックして保存する
-- ディレクトリが存在しない場合は自動で新規作成する
+- `csv.writer` を使用して `G:\マイドライブ\LOGS_Pixhawk6c\` にCSVファイルを出力
 - ファイル名は `record_YYYYMMDD_HHMMSS.csv`（開始時刻から生成）
 - 先頭行にヘッダーを書き込み、続けて全データ行を出力
 
@@ -461,7 +483,6 @@ CSV 記録は UDP 送信とは独立して動作し、互いに影響しない�
 
 | 日付 | 変更内容 |
 |------|---------|
-| 2026-07-05 | CSV座標データの保存先を `config.json` から設定できるように変更。他PC環境での実行も考慮し、指定フォルダが書き込み不可能な場合は自動的にスクリプト位置の `logs/` フォルダにフォールバックして保存する機能を追加。 |
 | 2026-05-31 | UDP通信をpickleからstruct 23byte固定長バイナリに変更。GPS座標変換(SDK側で`ned_to_gps()` → `lat_e7/lon_e7/alt_mm`)、`unix_time_sec`をstructに埋め込み。Raspi→FC周期をGPS_INPUT 15Hz/SYSTEM_TIME 15Hz(間引きなし)に統一。SYSTEM_TIMEは独立パケット廃止しstruct埋め込み。§4.2のタイトルと説明を実装仕様に変更。config.jsonの`system_time_divider`を予備扱いに変更。 |
 | 2026-05-31 | Enterキー操作を3ステートトグルから2ステートトグルに簡略化（全0行マーカー廃止、Enterごとに新規CSV生成）。CSVサンプルのtimestampを time.time_ns() 整数形式に修正 |
 | 2026-05-31 | CSV記録の timestamp を Motive公式タイムスタンプから SDK生成(`time.time_ns()`) に修正（Motiveがタイムスタンプを送信しない実装に合わせた設計変更） |
