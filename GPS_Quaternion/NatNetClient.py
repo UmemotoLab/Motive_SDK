@@ -278,6 +278,19 @@ class NatNetClient:
             print(f"✗ UDP send error to {target_ip}:{destination_port}: {e}")
             return False
 
+    def _should_send_motive_pose(
+        self, target_ip: str, rigid_body_id: int, now_ns: int
+    ) -> bool:
+        send_key = (target_ip, rigid_body_id)
+        last_send_ns = self._last_motive_pose_send_ns.get(send_key)
+        if (
+            last_send_ns is not None
+            and now_ns - last_send_ns < self._udp_min_interval_ns
+        ):
+            return False
+        self._last_motive_pose_send_ns[send_key] = now_ns
+        return True
+
     def start_recording(self):
         """記録開始"""
         if not self.recording_enabled:
@@ -614,13 +627,10 @@ class NatNetClient:
                     now_ns / 1e9,
                 )
                 for target_ip in self.motive_pose_targets:
-                    last_send_ns = self._last_motive_pose_send_ns.get(target_ip)
-                    if (
-                        last_send_ns is not None
-                        and now_ns - last_send_ns < self._udp_min_interval_ns
+                    if not self._should_send_motive_pose(
+                        target_ip, new_id, now_ns
                     ):
                         continue
-                    self._last_motive_pose_send_ns[target_ip] = now_ns
                     if not self.send_udp_data(
                         pose_packet, target_ip, self.motive_pose_port
                     ):
