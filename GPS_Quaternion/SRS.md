@@ -188,7 +188,7 @@ struct.pack(
 )
 ```
 
-受信側はGPS座標をENUローカル位置へ変換する。カメラ剛体についてはMotiveクォータニオンとカメラ取り付け軸変換からカメラ→ENU回転を構成する。各剛体の姿勢パケットは宛先IPと剛体IDの組ごとに最大`fps_expected`で送信する。同一IPへ複数剛体を配信する場合も、剛体ごとの送信周期が互いに抑止し合わない。
+受信側はGPS座標をNEDローカル位置へ変換する。Motiveワールド（X=北、Y=上、Z=東）からNED（X=北、Y=東、Z=下）への位置回転は`Rx(-90°)`です。姿勢クォータニオンはNatNetの`(x,y,z,w)`順を保ち、同じ座標基底回転をHamilton積`q_NED = q_frame ⊗ q_Motive ⊗ inverse(q_frame)`で適用します。カメラ剛体についてはNED姿勢とカメラ取付軸変換からカメラ→NED回転を構成します。各剛体の姿勢パケットは宛先IPと剛体IDの組ごとに最大`fps_expected`で送信します。同一IPへ複数剛体を配信する場合も、剛体ごとの送信周期が互いに抑止し合いません。
 
 ---
 
@@ -206,7 +206,7 @@ def __unpack_rigid_body(self, ...):
     pos_x, pos_y, pos_z = pos      # Motive座標: X=北, Y=上, Z=東
     qx, qy, qz, qw = rot          # Motiveクォータニオン (x, y, z, w)
     
-    # Motive座標 → NED変換（7引数: 位置3 + クォータニオン4）
+    # Motive座標 → NED（位置はRx(-90°)、姿勢は座標基底のクォータニオン積）
     ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
         pos_x, pos_y, pos_z, qx, qy, qz, qw)
     
@@ -401,7 +401,7 @@ G:\マイドライブ\LOGS_Pixhawk6c\record_YYYYMMDD_HHMMSS.csv
 | `quat_z` | float | クォータニオン Z成分 | `rot[2]` |
 | `quat_w` | float | クォータニオン W成分 | `rot[3]` |
 
-> **注意**: CSVには Motive から受信した**生データ**（変換前）が記録される。座標変換（`motive_to_ned()` + `ned_to_gps()`）は UDP 送信用（`GPS_INPUT`）であり、CSV 記録には適用されない。
+> **注意**: CSVには Motive から受信した**生データ**（変換前）が記録される。座標変換（`motive_to_ned()` + `ned_to_gps()`）はUDP送信用であり、CSV記録には適用されない。
 > **注意**: `timestamp` 列は **SDK側で `time.time_ns()` により生成** される。Motive からはフレームのタイムスタンプが送られてこないため（§3.3参照）、システムクロックに基づくナノ秒精度の時刻を記録する。
 
 #### サンプルデータ

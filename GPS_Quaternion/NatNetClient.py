@@ -40,6 +40,37 @@ FloatValue = struct.Struct( '<f' )
 DoubleValue = struct.Struct( '<d' )
 RIGID_BODY_POSE_MAGIC = b'RBPS'
 RIGID_BODY_POSE_FORMAT = '<4sBiii4fd'
+MOTIVE_TO_NED_QUATERNION_XYZW = (
+    -math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)
+)
+
+
+def _quaternion_multiply_xyzw(left, right):
+    """Hamilton product for active rotations stored as (x, y, z, w)."""
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _motive_quaternion_to_ned_xyzw(qx, qy, qz, qw):
+    """Change quaternion basis from Motive (X=N, Y=U, Z=E) to NED."""
+    quaternion_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if not math.isfinite(quaternion_norm) or quaternion_norm == 0:
+        raise ValueError("Motive quaternion must be finite and nonzero")
+    motive = tuple(
+        component / quaternion_norm for component in (qx, qy, qz, qw)
+    )
+    cx, cy, cz, cw = MOTIVE_TO_NED_QUATERNION_XYZW
+    inverse_frame_rotation = (-cx, -cy, -cz, cw)
+    return _quaternion_multiply_xyzw(
+        _quaternion_multiply_xyzw(MOTIVE_TO_NED_QUATERNION_XYZW, motive),
+        inverse_frame_rotation,
+    )
 
 # Increased size for the newest force plate
 FPCalMatrixRow = struct.Struct( '<ffffffffffff' )
@@ -192,19 +223,25 @@ class NatNetClient:
 
     def motive_to_ned(self, motive_x, motive_y, motive_z, motive_qx, motive_qy, motive_qz, motive_qw):
         """
-        Motive座標系（左手系：X=北,Y=上,Z=東）からNED座標系（右手系：X=北,Y=東,Z=下）への変換
+        Motive (X=North, Y=Up, Z=East) to right-handed NED.
+        The frame rotation is Rx(-90 degrees); positions and quaternion
+        basis changes use that same rotation.
         """
-        # 位置変換
-        ned_x = motive_x   # 北→北
-        ned_y = motive_z   # 東→東
-        ned_z = -motive_y  # 上→下（符号反転）
-        
-        # クオータニオン変換（順序に注意）
-        ned_qw = motive_qw   # w成分
-        ned_qx = motive_qx   # X軸（北）→X軸（北）
-        ned_qy = motive_qz   # Z軸（東）→Y軸（東）
-        ned_qz = -motive_qy  # Y軸（上）→Z軸（下）、符号反転
-        
+        frame_rotation = (
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, -1.0, 0.0),
+        )
+        motive_position = (motive_x, motive_y, motive_z)
+        ned_position = tuple(
+            sum(frame_rotation[row][column] * motive_position[column]
+                for column in range(3))
+            for row in range(3)
+        )
+        ned_qx, ned_qy, ned_qz, ned_qw = _motive_quaternion_to_ned_xyzw(
+            motive_qx, motive_qy, motive_qz, motive_qw
+        )
+        ned_x, ned_y, ned_z = ned_position
         return ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz
 
     def ned_to_gps(self, ned_x, ned_y, ned_z):
